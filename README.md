@@ -114,12 +114,30 @@ OPTIONS:
 
 ## GitHub Token 配置
 
+### 方式一：Fine-grained Personal Access Token（推荐）
+
+1. 访问 [GitHub Settings > Developer settings > Personal access tokens > Fine-grained tokens](https://github.com/settings/tokens?type=beta)
+2. 点击 "Generate new token"
+3. 配置 Token：
+   - **Token name**: 给一个描述性名称，如 "flying-rule-provider"
+   - **Expiration**: 选择合适的过期时间
+   - **Repository access**:
+     - 选择 "Only select repositories"
+     - 选择您需要推送的仓库
+   - **Permissions**:
+     - Repository permissions: **Contents** → **Read and write**
+4. 复制生成的token
+
+### 方式二：Classic Personal Access Token
+
 1. 访问 [GitHub Settings > Developer settings > Personal access tokens](https://github.com/settings/tokens)
 2. 点击 "Generate new token (classic)"
 3. 选择以下权限：
    - `repo` - 完整的仓库访问权限
    - `workflow` - 如果需要更新GitHub Actions文件
 4. 复制生成的token
+
+**注意**：Fine-grained token 更安全，因为它只能访问您指定的仓库，而 classic token 可以访问您所有的仓库。
 
 ## 批量处理配置文件
 
