@@ -9,7 +9,9 @@
 - **纯Bash实现，无任何外部依赖**（包括Python）
 - 通过GitHub API直接推送到仓库，无需本地Git配置
 - 支持Dry-run模式，仅处理文件不推送
+- **智能文件比较**：通过SHA-256哈希值比较，跳过未更改文件的上传
 - 彩色输出，清晰的执行日志
+- **调试模式**：使用 `--debug` 参数查看详细的哈希比较信息
 
 ## 使用方法
 
@@ -40,6 +42,7 @@ OPTIONS:
     -c, --commit-msg MSG     提交消息 (默认: 自动生成)
     -f, --config-file FILE   批量处理配置文件
     --dry-run                仅处理文件，不推送到GitHub
+    --debug                  启用调试模式，显示哈希值等详细信息
     -h, --help               显示帮助信息
 ```
 
@@ -100,6 +103,15 @@ OPTIONS:
   https://cdn.jsdelivr.net/gh/blackmatrix7/ios_rule_script@master/rule/Clash/Telegram/Telegram.yaml
 ```
 
+8. **启用调试模式查看哈希比较**：
+```bash
+./process-rules.sh \
+  -t ghp_xxx \
+  -r username/rules-repo \
+  --debug \
+  https://example.com/rules.yaml
+```
+
 ## GitHub Token 配置
 
 1. 访问 [GitHub Settings > Developer settings > Personal access tokens](https://github.com/settings/tokens)
@@ -158,6 +170,50 @@ payload:
 - `GEOIP` - 地理位置IP规则
 - `IP-ASN` - 自治系统号码规则
 
+## 智能文件比较（哈希校验）
+
+脚本新增了智能文件比较功能，通过SHA-256哈希值比较本地处理后的文件与GitHub上已存在的文件：
+
+### 工作原理
+
+1. **下载并处理文件**：从URL下载规则文件，自动为IP规则添加`no-resolve`
+2. **获取远程文件**：通过GitHub API下载仓库中的现有文件
+3. **计算哈希值**：使用SHA-256算法计算本地和远程文件的哈希值
+4. **比较结果**：
+   - 如果哈希值相同，说明文件未更改，跳过上传
+   - 如果哈希值不同，说明文件已更新，正常上传
+
+### 使用场景
+
+- **批量处理时**：避免重复上传未更改的文件，节省API调用
+- **CI/CD自动化**：减少不必要的提交，保持仓库历史清洁
+- **性能优化**：大文件处理时，跳过未更改文件的上传
+
+### 示例输出
+
+```bash
+# 文件未更改，跳过上传
+[INFO] File unchanged (hash: 996651175d82cdc34e07c2429d5737ddbe15a5ed83e54dbaf84727a6f5927f92), skipping upload
+[INFO] Skipping upload: file is unchanged
+
+# 调试模式显示详细信息
+[DEBUG] Local hash:  996651175d82cdc34e07c2429d5737ddbe15a5ed83e54dbaf84727a6f5927f92
+[DEBUG] Remote hash: 996651175d82cdc34e07c2429d5737ddbe15a5ed83e54dbaf84727a6f5927f92
+```
+
+## 调试模式
+
+使用 `--debug` 参数可以查看更详细的执行信息：
+
+- 显示文件哈希值
+- 显示GitHub API响应详情
+- 显示base64编码/解码过程
+- 显示错误详情
+
+```bash
+./process-rules.sh --debug -t ghp_xxx -r username/repo https://example.com/rules.yaml
+```
+
 ## 注意事项
 
 1. 确保GitHub Token有足够的权限
@@ -166,6 +222,7 @@ payload:
 4. Dry-run模式适合测试脚本功能
 5. 脚本仅处理YAML/YML格式文件
 6. 处理后的文件保持原名，直接修改原文件内容
+7. **文件比较是安全的**：如果API调用失败或文件不存在，脚本会正常上传文件
 
 ## 测试
 

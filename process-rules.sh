@@ -24,6 +24,12 @@ print_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
+print_debug() {
+    if [[ "$DEBUG_MODE" == true ]]; then
+        echo -e "${YELLOW}[DEBUG]${NC} $1"
+    fi
+}
+
 # 显示帮助信息
 show_help() {
     cat << EOF
@@ -44,6 +50,7 @@ OPTIONS:
     -c, --commit-msg MSG     Commit message (default: auto-generated)
     -f, --config-file FILE   Config file with list of URLs to process
     --dry-run                Only process files without pushing to GitHub
+    --debug                  Enable debug logging with hash values
     -h, --help               Show this help message
 
 EXAMPLES:
@@ -76,6 +83,7 @@ EOF
 GITHUB_TOKEN=""
 REPO=""
 BRANCH="main"
+DEBUG_MODE=false
 # 固定输出目录为 rules
 OUTPUT_DIR="rules"
 COMMIT_MSG=""
@@ -109,6 +117,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --dry-run)
             DRY_RUN=true
+            shift
+            ;;
+        --debug)
+            DEBUG_MODE=true
             shift
             ;;
         -h|--help)
@@ -219,6 +231,14 @@ process_rule_file() {
 
     # 推送到GitHub（如果不是dry-run）
     if [[ "$DRY_RUN" == false ]]; then
+        # Check if file needs upload before proceeding
+        local remote_path="rules/$filename"
+
+        if compare_with_remote_file "$file_path" "$remote_path"; then
+            print_info "Skipping upload: file is unchanged"
+            return 0
+        fi
+
         # 使用自定义提交消息或默认消息
         local final_commit_msg="$commit_msg"
         if [[ -z "$final_commit_msg" ]]; then
@@ -261,8 +281,8 @@ push_to_github() {
     # 检测系统类型
     local file_b64
     if [[ "$(uname)" == "Darwin" ]]; then
-        # macOS
-        file_b64=$(base64 -i "$file_path")
+        # macOS - use -i flag and remove line breaks
+        file_b64=$(base64 -i "$file_path" | tr -d '\n')
     else
         # Linux
         file_b64=$(base64 -w 0 "$file_path")
@@ -451,6 +471,107 @@ process_batch() {
     print_info "Batch processing completed: $success_count/$total_count files processed successfully"
 
     return 0
+}
+
+# Calculate SHA-256 hash of a file with cross-platform compatibility
+calculate_file_hash() {
+    local file_path="$1"
+    local file_hash=""
+
+    # Cross-platform SHA-256 calculation
+    if command -v sha256sum >/dev/null 2>&1; then
+        # Linux (sha256sum)
+        file_hash=$(sha256sum "$file_path" | cut -d' ' -f1)
+    elif command -v shasum >/dev/null 2>&1; then
+        # macOS (shasum with -a 256)
+        file_hash=$(shasum -a 256 "$file_path" | cut -d' ' -f1)
+    elif command -v openssl >/dev/null 2>&1; then
+        # Fallback to openssl
+        file_hash=$(openssl dgst -sha256 "$file_path" | cut -d' ' -f2)
+    else
+        print_error "No SHA-256 command available"
+        return 1
+    fi
+
+    echo "$file_hash"
+    return 0
+}
+
+# Compare local file with remote file by downloading and hashing
+compare_with_remote_file() {
+    local local_file="$1"
+    local remote_path="$2"  # Path in GitHub repo
+
+    print_debug "Comparing file: $local_file with remote: $remote_path"
+
+    # Get GitHub file info
+    local api_url="https://api.github.com/repos/$REPO/contents/$remote_path"
+    local response=$(curl -s \
+        -H "Authorization: token $GITHUB_TOKEN" \
+        -H "Accept: application/vnd.github.v3+json" \
+        "$api_url")
+
+    # Check if file exists
+    if echo "$response" | grep -q '"message": "Not Found"'; then
+        print_info "File does not exist on GitHub, will upload"
+        return 1  # Different, need upload
+    fi
+
+    # Extract and decode content
+    local encoded_content=""
+
+    # Try to extract content using multiple methods
+    if command -v python3 >/dev/null 2>&1; then
+        # Use python to properly parse JSON
+        encoded_content=$(echo "$response" | python3 -c "import sys, json; data = json.load(sys.stdin); print(data.get('content', ''))" 2>/dev/null | tr -d '\n')
+    elif command -v python >/dev/null 2>&1; then
+        # Use python2 if available
+        encoded_content=$(echo "$response" | python -c "import sys, json; data = json.load(sys.stdin); print(data.get('content', ''))" 2>/dev/null | tr -d '\n')
+    else
+        # Fallback to sed extraction (may not handle multi-line content well)
+        encoded_content=$(echo "$response" | sed ':a;N;$!ba;s/.*"content": "\([^"]*\)".*/\1/' | tr -d '\n')
+    fi
+
+    # Fix JSON escaped characters and remove whitespace/newlines
+    if [[ -n "$encoded_content" ]]; then
+        # Remove all whitespace, newlines, and carriage returns
+        encoded_content=$(echo "$encoded_content" | tr -d ' \n\r\t')
+        print_debug "Encoded content length: ${#encoded_content}"
+        print_debug "Encoded content (first 100 chars): ${encoded_content:0:100}"
+    fi
+
+    if [[ -z "$encoded_content" ]]; then
+        print_warn "Failed to download remote content, proceeding with upload"
+        return 1
+    fi
+
+    # Decode base64 content
+    local temp_remote_file=$(mktemp)
+    if echo "$encoded_content" | base64 -d > "$temp_remote_file" 2>&1; then
+        # Calculate hashes
+        local local_hash=$(calculate_file_hash "$local_file")
+        local remote_hash=$(calculate_file_hash "$temp_remote_file")
+
+        rm -f "$temp_remote_file"
+
+        print_debug "Local hash:  $local_hash"
+        print_debug "Remote hash: $remote_hash"
+
+        if [[ "$local_hash" == "$remote_hash" ]]; then
+            print_info "File unchanged (hash: $local_hash), skipping upload"
+            return 0  # Same, no upload needed
+        else
+            return 1  # Different, need upload
+        fi
+    else
+        # Capture the base64 decode error for debugging
+        local decode_error=$(echo "$encoded_content" | base64 -d 2>&1 | head -1)
+        rm -f "$temp_remote_file"
+        print_debug "Base64 decode error: $decode_error"
+        print_debug "Attempting to decode with: echo '$encoded_content' | base64 -d"
+        print_warn "Failed to decode remote content, proceeding with upload"
+        return 1
+    fi
 }
 
 # 创建rules目录
