@@ -6,7 +6,7 @@
 
 - 下载并处理来自指定URL的YAML格式rule-set文件
 - 自动为IP相关规则（IP-CIDR、IP-CIDR6、GEOIP、IP-ASN）添加`no-resolve`标记
-- **纯Bash实现，无任何外部依赖**（包括Python）
+- 纯Bash实现，无任何外部依赖
 - 通过GitHub API直接推送到仓库，无需本地Git配置
 - 支持Dry-run模式，仅处理文件不推送
 - **智能文件比较**：通过SHA-256哈希值比较，跳过未更改文件的上传
@@ -65,12 +65,16 @@ OPTIONS:
   https://example.com/rules.yaml
 ```
 
-3. **Dry-run模式（仅本地处理）**：
+3. **Dry-run模式（模拟上传，包括文件比较）**：
 ```bash
 ./process-rules.sh \
   --dry-run \
   https://example.com/rules.yaml
 ```
+   - 会下载和处理文件
+   - 会与远程文件进行比较
+   - 显示是否需要上传，但不实际执行
+   - 输出示例：`[DRY-RUN] Would skip: file.yaml (file unchanged)` 或 `[DRY-RUN] Would upload: file.yaml (file has changed)`
 
 4. **自定义提交消息**：
 ```bash
@@ -95,6 +99,13 @@ OPTIONS:
   -f batch-config.yaml \
   --dry-run
 ```
+   - 批量检查所有文件是否需要更新
+   - 显示每个文件的处理结果
+   - 示例输出：
+     ```
+     [DRY-RUN] Would skip: OpenAI.yaml (file unchanged)
+     [DRY-RUN] Would upload: Google.yaml (file has changed)
+     ```
 
 7. **实际使用示例（Telegram规则集）**：
 ```bash

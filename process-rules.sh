@@ -3,7 +3,8 @@
 # flying-rule-provider processor
 # 用于转换rule-set文件并推送到GitHub仓库
 
-set -e
+# Only exit on error in critical sections, not during batch processing
+# We'll handle errors individually in each function
 
 # 颜色输出
 RED='\033[0;31m'
@@ -229,24 +230,38 @@ process_rule_file() {
 
     print_info "Processed file saved to: $file_path"
 
+    # 总是进行文件比较（包括dry-run模式）
+    local remote_path="rules/$filename"
+    local would_upload=true
+
+    # Only check remote file if we have GitHub credentials
+    if [[ -n "$GITHUB_TOKEN" && -n "$REPO" ]]; then
+        if compare_with_remote_file "$file_path" "$remote_path"; then
+            would_upload=false
+        fi
+    fi
+
     # 推送到GitHub（如果不是dry-run）
     if [[ "$DRY_RUN" == false ]]; then
-        # Check if file needs upload before proceeding
-        local remote_path="rules/$filename"
+        if [[ "$would_upload" == true ]]; then
+            # 使用自定义提交消息或默认消息
+            local final_commit_msg="$commit_msg"
+            if [[ -z "$final_commit_msg" ]]; then
+                final_commit_msg="Update rule-set: $filename (auto-add no-resolve to IP rules)"
+            fi
 
-        if compare_with_remote_file "$file_path" "$remote_path"; then
+            # 推送文件到GitHub
+            push_to_github "$file_path" "$final_commit_msg"
+        else
             print_info "Skipping upload: file is unchanged"
-            return 0
         fi
-
-        # 使用自定义提交消息或默认消息
-        local final_commit_msg="$commit_msg"
-        if [[ -z "$final_commit_msg" ]]; then
-            final_commit_msg="Update rule-set: $filename (auto-add no-resolve to IP rules)"
+    else
+        # Dry-run mode - show what would happen
+        if [[ "$would_upload" == true ]]; then
+            print_info "[DRY-RUN] Would upload: $filename (file has changed)"
+        else
+            print_info "[DRY-RUN] Would skip: $filename (file unchanged)"
         fi
-
-        # 推送文件到GitHub
-        push_to_github "$file_path" "$final_commit_msg"
     fi
 
     return 0
@@ -459,12 +474,17 @@ process_batch() {
 
         print_info ""
         print_info "=== Processing: $filename ==="
+        print_debug "URL: $url"
 
+        # Reset error handling for each file
+        set +e
         if process_rule_file "$url" ""; then
             ((success_count++))
+            print_debug "Successfully processed: $filename"
         else
             print_error "Failed to process: $url"
         fi
+        set -e
     done
 
     print_info ""
@@ -520,22 +540,69 @@ compare_with_remote_file() {
     # Extract and decode content
     local encoded_content=""
 
-    # Try to extract content using multiple methods
-    if command -v python3 >/dev/null 2>&1; then
-        # Use python to properly parse JSON
-        encoded_content=$(echo "$response" | python3 -c "import sys, json; data = json.load(sys.stdin); print(data.get('content', ''))" 2>/dev/null | tr -d '\n')
-    elif command -v python >/dev/null 2>&1; then
-        # Use python2 if available
-        encoded_content=$(echo "$response" | python -c "import sys, json; data = json.load(sys.stdin); print(data.get('content', ''))" 2>/dev/null | tr -d '\n')
-    else
-        # Fallback to sed extraction (may not handle multi-line content well)
-        encoded_content=$(echo "$response" | sed ':a;N;$!ba;s/.*"content": "\([^"]*\)".*/\1/' | tr -d '\n')
+    # Extract content using sed with a more robust pattern
+    # GitHub API returns JSON with base64 content that may be split across lines
+
+    # First, let's debug what we received
+    print_debug "GitHub API response status: $(echo "$response" | grep -o '"message":[^,]*' || echo 'OK')"
+    print_debug "Response size: ${#response} characters"
+    print_debug "Response preview: $(echo "$response" | head -c 200)"
+
+    # Check if we got an error response first
+    if echo "$response" | grep -q '"message"'; then
+        local error_msg=$(echo "$response" | grep -o '"message":"[^"]*"' | cut -d'"' -f4)
+        print_debug "GitHub API error: $error_msg"
+        # Return 1 to indicate we need to upload (couldn't compare)
+        return 1
     fi
 
-    # Fix JSON escaped characters and remove whitespace/newlines
+    # Save response to temp file for debugging
+    local debug_response_file=$(mktemp)
+    echo "$response" > "$debug_response_file"
+    print_debug "Full response saved to: $debug_response_file"
+
+    # Try to extract the content field
+    local temp_content=""
+
+    # First, make sure we're dealing with a valid JSON response
+    if [[ -z "$response" || "$response" == "{" ]]; then
+        print_debug "Invalid or empty response"
+        rm -f "$debug_response_file"
+        return 1
+    fi
+
+    # Method 1: Remove all newlines first to make it a single line JSON
+    local single_line_json=$(echo "$response" | tr -d '\n\r' | tr -s ' ')
+    print_debug "After removing newlines: ${#single_line_json} chars"
+
+    # Now extract using a simple pattern
+    temp_content=$(echo "$single_line_json" | sed 's/.*"content": *"//' | sed 's/".*//')
+
+    # Clean up debug file
+    rm -f "$debug_response_file"
+
+    # Debug the extracted content
+    if [[ -n "$temp_content" ]]; then
+        print_debug "Extracted ${#temp_content} characters of content"
+        print_debug "Content starts with: ${temp_content:0:50}"
+        print_debug "Content ends with: ${temp_content: -50}"
+    fi
+
+    # Process the extracted content
+    if [[ -n "$temp_content" && ${#temp_content} -gt 10 && "$temp_content" != "{" ]]; then
+        # Handle JSON escapes
+        temp_content=$(echo "$temp_content" | sed 's/\\n/\n/g')
+        temp_content=$(echo "$temp_content" | sed 's/\\"/"/g')
+        temp_content=$(echo "$temp_content" | sed 's/\\\\/\\/g')
+
+        # Remove all whitespace and newlines for clean base64
+        encoded_content=$(echo "$temp_content" | tr -d ' \n\r\t')
+    fi
+
+    # Additional cleanup
     if [[ -n "$encoded_content" ]]; then
-        # Remove all whitespace, newlines, and carriage returns
-        encoded_content=$(echo "$encoded_content" | tr -d ' \n\r\t')
+        # Collapse any remaining newlines that might be in the middle
+        encoded_content=$(echo "$encoded_content" | paste -sd '' 2>/dev/null || echo "$encoded_content")
         print_debug "Encoded content length: ${#encoded_content}"
         print_debug "Encoded content (first 100 chars): ${encoded_content:0:100}"
     fi
